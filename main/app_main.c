@@ -20,11 +20,12 @@
 #include "soc/sdio_slave_periph.h"
 #include "esp_log.h"
 #include "esp_attr.h"
-#include "esp_serial_slave_link/essl_sdio.h"
 #include "sdkconfig.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdspi_host.h"
 #include "ef.h"
+#include "sip.h"
+#include "esp_serial_slave_link/essl_sdio.h"
 
 #define TIMEOUT_MAX   UINT32_MAX
 
@@ -400,60 +401,6 @@ void job_fifo(essl_handle_t handle)
     }
 }
 
-struct sip_hdr {
-        uint8_t fc[2];  //fc[0]: type and ifidx ; fc[1] is eventID if the first ctrl pkt in the chain. data pkt still can use fc[1] to set flag
-        uint16_t len;
-        union {
-                volatile uint32_t recycled_credits; /* last 12bits is credits, first 20 bits is actual length of the first pkt in the chain */
-                uint32_t tx_info;
-        } u;
-        uint32_t seq;
-} __packed;
-
-#define SIP_BOOT_BUF_SIZE 512
-
-int spi_write_mem(struct esp_sip *sip, uint32_t addr, uint8_t *buf, uint16_t len)
-{
-    uint8_t *src = NULL;
-    uint32_t load_addr = 0;
-    uint16_t hdrs, buf_size, rem;
-    uint8_t *buf_temp = malloc(SIP_BOOT_BUF_SIZE);
-    struct sip_hdr *chdr;
-    memset(buf_temp, 0, SIP_BOOT_BUF_SIZE);
-    
-    chdr = (struct sip_hdr *)buf_temp;
-    chdr->fc[0] = SIP_CTRL;
-    chdr->u.tx_info = SIP_CMD_WRITE_MEMORY;
-    rem = len;
-    hdrs = sizeof(struct sip_hdr) + sizeof(struct sip_cmd_write_memory);
-
-    while(rem) {
-        src = &buf[len - rem];
-        load_addr = addr + (len -  rem);
-        if (rem < (SIP_BOOT_BUF_SIZE - hdrs)) {
-            buf_size = roundup(rem, 4);
-            memset(buf_temp, 0, buf_size);
-            rem = 0;
-        } else {
-            buf_size = SIP_BOOT_BUF_SIZE - hdrs;
-            rem -= buf_size;
-        }
-        chdr->len = buf_size + hdrs;
-        chdr->seq = sip->txseq++;
-        cmd = (struct sip_cmd_write_memory *)(buf_temp + SIP_CTRL_HDR_LEN);
-        cmd->len = buf_size;
-        cmd->addr = load_addr;
-        memcpy(buf_temp, src, buf_size);
-        uint32_t *t = (uint32_t *)buf_temp;
-        int err = esp_comm_write(,buf_temp, chdr->len, ESP_SIF_SYNC);
-        if (err) {
-            printf("err com write\n");
-            return;
-        }
-        ets_delay_us(1000);
-    }
-}
-
 typedef struct fw_header {
     uint8_t magic_num;
     uint8_t blk_cnt;
@@ -468,28 +415,34 @@ typedef struct blk_header {
 
 void sdhost_burn_fw(void)
 {
-    printf("sieof fw %d\n", sizeof(eagle_fw1));
+    // printf("sieof fw %d\n", sizeof(eagle_fw1));
     fw_header_t *fw_h = (fw_header_t *)(&eagle_fw1[0]);
     ets_printf("magic num %x  block cnt %d entr_addr %x\n", fw_h->magic_num, fw_h->blk_cnt, fw_h->entry_addr);
     blk_header_t *bk_h = (blk_header_t*)(eagle_fw1 + sizeof(fw_header_t));
     int bk_cnt = fw_h->blk_cnt;
+
     do {
         ets_printf("load addr%x  length %d\n", bk_h->addr, bk_h->len);
         uint8_t *p = (uint8_t *)bk_h;
+        sip_write_mem(bk_h->addr, &p[sizeof(blk_header_t)], bk_h->len);
         // essl_send_packet(handle, );
-        
+
         p += bk_h->len + sizeof(blk_header_t);
         bk_h = (blk_header_t*)p;
     } while(--bk_cnt);
-    uint8_t *pr = (uint8_t *)bk_h;
-    pr--;
-    ets_printf("%x\n", *pr);
+
+    // uint8_t *pr = (uint8_t *)bk_h;
+    // pr--;
+    // ets_printf("%x\n", *pr);
 }
+
+void essl_set_handle(essl_handle_t _handle);
 
 void app_main(void)
 {
     essl_handle_t handle;
     esp_err_t err;
+    vTaskDelay(2000/portTICK_PERIOD_MS);
 
     //enable the power if on espressif SDIO master-slave board
     slave_power_on();
@@ -500,14 +453,15 @@ void app_main(void)
 
     err = slave_reset(handle);
     ESP_ERROR_CHECK(err);
-    sdhost_burn_fw();
+    essl_set_handle(handle);
 
     uint32_t start, end;
-
+    sdhost_burn_fw();
+    sip_send_bootup();
     // job_write_reg(handle, 10);
 
     while (1) {
-        job_fifo(handle);
+        // job_fifo(handle);
         vTaskDelay(1000/portTICK_PERIOD_MS);
     }
 }
