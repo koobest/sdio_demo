@@ -458,6 +458,7 @@ void app_main(void)
     uint32_t start, end;
     sdhost_burn_fw();
     sip_send_bootup();
+    slave_reset(handle);
     // job_write_reg(handle, 10);
 
     while (1) {
